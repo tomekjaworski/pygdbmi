@@ -1,14 +1,20 @@
 """GdbController class to programatically run gdb and get structured output"""
 
-import sys
+from distutils.spawn import find_executable
+import logging
+import os
+from pprint import pformat
+from pygdbmi import gdbmiparser
+import signal
 import select
 import subprocess
-import os
+import sys
 import time
-import signal
-from pprint import pprint
-from pygdbmi import gdbmiparser
-from distutils.spawn import find_executable
+
+try:  # py3
+    from shlex import quote
+except ImportError:  # py2
+    from pipes import quote
 
 PYTHON3 = sys.version_info.major == 3
 DEFAULT_GDB_TIMEOUT_SEC = 1
@@ -32,11 +38,13 @@ unicode = str if PYTHON3 else unicode  # noqa: F821
 class NoGdbProcessError(ValueError):
     """Raise when trying to interact with gdb subprocess, but it does not exist.
     It may have been killed and removed, or failed to initialize for some reason."""
+
     pass
 
 
 class GdbTimeoutError(ValueError):
     """Raised when no response is recieved from gdb after the timeout has been triggered"""
+
     pass
 
 
@@ -58,11 +66,15 @@ class GdbController:
     def __init__(
         self,
         gdb_path="gdb",
-        gdb_args=["--nx", "--quiet", "--interpreter=mi2"],
+        gdb_args=None,
         time_to_check_for_additional_output_sec=DEFAULT_TIME_TO_CHECK_FOR_ADDITIONAL_OUTPUT_SEC,
         rr=False,
         verbose=False,
     ):
+        if gdb_args is None:
+            default_gdb_args = ["--nx", "--quiet", "--interpreter=mi2"]
+            gdb_args = default_gdb_args
+
         self.verbose = verbose
         self.abs_gdb_path = None  # abs path to gdb executable
         self.cmd = []  # the shell command to run gdb
@@ -80,17 +92,39 @@ class GdbController:
         else:
             if not gdb_path:
                 raise ValueError("a valid path to gdb must be specified")
+
             else:
                 abs_gdb_path = find_executable(gdb_path)
                 if abs_gdb_path is None:
                     raise ValueError(
                         'gdb executable could not be resolved from "%s"' % gdb_path
                     )
+
                 else:
                     self.abs_gdb_path = abs_gdb_path
             self.cmd = [self.abs_gdb_path] + gdb_args
 
+        self._attach_logger(verbose)
         self.spawn_new_gdb_subprocess()
+
+    def _attach_logger(self, verbose):
+        handler = logging.StreamHandler()
+        handler.setFormatter(logging.Formatter("%(message)s"))
+        unique_number = time.time()
+        self.logger = logging.getLogger(__name__ + "." + str(unique_number))
+        self.logger.propagate = False
+        if verbose:
+            level = logging.DEBUG
+        else:
+            level = logging.ERROR
+        self.logger.setLevel(level)
+        self.logger.addHandler(handler)
+
+    def get_subprocess_cmd(self):
+        """Returns the shell-escaped string used to invoke the gdb subprocess.
+        This is a string that can be executed directly in a shell.
+        """
+        return " ".join(quote(c) for c in self.cmd)
 
     def spawn_new_gdb_subprocess(self):
         """Spawn a new gdb subprocess with the arguments supplied to the object
@@ -99,22 +133,21 @@ class GdbController:
         Return int: gdb process id
         """
         if self.gdb_process:
-            if self.verbose:
-                print("Killing current gdb subprocess (pid %d)" % self.gdb_process.pid)
+            self.logger.debug(
+                "Killing current gdb subprocess (pid %d)" % self.gdb_process.pid
+            )
             self.exit()
 
-        if self.verbose:
-            print('Launching gdb: "%s"' % " ".join(self.cmd))
+        self.logger.debug('Launching gdb: "%s"' % " ".join(self.cmd))
 
         # Use pipes to the standard streams
-        # In UNIX a newline will typically only flush the buffer if stdout is a terminal.
-        # If the output is being redirected to a file, a newline won't flush
         self.gdb_process = subprocess.Popen(
             self.cmd,
             shell=False,
             stdout=subprocess.PIPE,
             stdin=subprocess.PIPE,
             stderr=subprocess.PIPE,
+            bufsize=0,
         )
 
         _make_non_blocking(self.gdb_process.stdout)
@@ -137,6 +170,7 @@ class GdbController:
         Raise NoGdbProcessError if either of the above are not true."""
         if not self.gdb_process:
             raise NoGdbProcessError("gdb process is not attached")
+
         elif self.gdb_process.poll() is not None:
             raise NoGdbProcessError(
                 "gdb process has already finished with return code: %s"
@@ -147,7 +181,6 @@ class GdbController:
         self,
         mi_cmd_to_write,
         timeout_sec=DEFAULT_GDB_TIMEOUT_SEC,
-        verbose=False,
         raise_error_on_timeout=True,
         read_response=True,
     ):
@@ -156,7 +189,6 @@ class GdbController:
         Args:
             mi_cmd_to_write (str or list): String to write to gdb. If list, it is joined by newlines.
             timeout_sec (float): Maximum number of seconds to wait for response before exiting. Must be >= 0.
-            verbose (bool): Be verbose in what is being written
             raise_error_on_timeout (bool): If read_response is True, raise error if no response is received
             read_response (bool): Block and read response. If there is a separate thread running,
             this can be false, and the reading thread read the output.
@@ -168,10 +200,8 @@ class GdbController:
         """
         self.verify_valid_gdb_subprocess()
         if timeout_sec < 0:
-            print("warning: timeout_sec was negative, replacing with 0")
+            self.logger.warning("timeout_sec was negative, replacing with 0")
             timeout_sec = 0
-
-        verbose = self.verbose or verbose
 
         # Ensure proper type of the mi command
         if type(mi_cmd_to_write) in [str, unicode]:
@@ -184,8 +214,7 @@ class GdbController:
                 + str(type(mi_cmd_to_write))
             )
 
-        if verbose:
-            print("\nwriting: %s" % mi_cmd_to_write)
+        self.logger.debug("writing: %s", mi_cmd_to_write)
 
         if not mi_cmd_to_write.endswith("\n"):
             mi_cmd_to_write_nl = mi_cmd_to_write + "\n"
@@ -206,22 +235,18 @@ class GdbController:
                 # to evaluate, and we won't get a response
                 self.gdb_process.stdin.flush()
             else:
-                print("developer error: got unexpected fileno %d, event %d" % fileno)
+                self.logger.error("got unexpected fileno %d" % fileno)
 
         if read_response is True:
             return self.get_gdb_response(
-                timeout_sec=timeout_sec,
-                raise_error_on_timeout=raise_error_on_timeout,
-                verbose=verbose,
+                timeout_sec=timeout_sec, raise_error_on_timeout=raise_error_on_timeout
             )
+
         else:
             return []
 
     def get_gdb_response(
-        self,
-        timeout_sec=DEFAULT_GDB_TIMEOUT_SEC,
-        raise_error_on_timeout=True,
-        verbose=False,
+        self, timeout_sec=DEFAULT_GDB_TIMEOUT_SEC, raise_error_on_timeout=True
     ):
         """Get response from GDB, and block while doing so. If GDB does not have any response ready to be read
         by timeout_sec, an exception is raised.
@@ -230,7 +255,6 @@ class GdbController:
             timeout_sec (float): Maximum time to wait for reponse. Must be >= 0. Will return after
             raise_error_on_timeout (bool): Whether an exception should be raised if no response was found
             after timeout_sec
-            verbose (bool): If true, more output it printed
 
         Returns:
             List of parsed GDB responses, returned from gdbmiparser.parse_response, with the
@@ -244,24 +268,23 @@ class GdbController:
 
         self.verify_valid_gdb_subprocess()
         if timeout_sec < 0:
-            print("warning: timeout_sec was negative, replacing with 0")
+            self.logger.warning("timeout_sec was negative, replacing with 0")
             timeout_sec = 0
 
-        verbose = self.verbose or verbose
-
         if USING_WINDOWS:
-            retval = self._get_responses_windows(timeout_sec, verbose)
+            retval = self._get_responses_windows(timeout_sec)
         else:
-            retval = self._get_responses_unix(timeout_sec, verbose)
+            retval = self._get_responses_unix(timeout_sec)
 
         if not retval and raise_error_on_timeout:
             raise GdbTimeoutError(
                 "Did not get response from gdb after %s seconds" % timeout_sec
             )
+
         else:
             return retval
 
-    def _get_responses_windows(self, timeout_sec, verbose):
+    def _get_responses_windows(self, timeout_sec):
         """Get responses on windows. Assume no support for select and use a while loop."""
         timeout_time_sec = time.time() + timeout_sec
         responses = []
@@ -274,7 +297,7 @@ class GdbController:
                     )
                 else:
                     raw_output = self.gdb_process.stdout.read().replace(b"\r", b"\n")
-                responses += self._get_responses_list(raw_output, "stdout", verbose)
+                responses += self._get_responses_list(raw_output, "stdout")
             except IOError:
                 pass
 
@@ -286,15 +309,16 @@ class GdbController:
                     )
                 else:
                     raw_output = self.gdb_process.stderr.read().replace(b"\r", b"\n")
-                responses += self._get_responses_list(raw_output, "stderr", verbose)
+                responses += self._get_responses_list(raw_output, "stderr")
             except IOError:
                 pass
 
             if time.time() > timeout_time_sec:
                 break
+
         return responses
 
-    def _get_responses_unix(self, timeout_sec, verbose):
+    def _get_responses_unix(self, timeout_sec):
         """Get responses on unix-like system. Use select to wait for output."""
         timeout_time_sec = time.time() + timeout_sec
         responses = []
@@ -322,9 +346,8 @@ class GdbController:
                         raise ValueError(
                             "Developer error. Got unexpected file number %d" % fileno
                         )
-                    responses_list = self._get_responses_list(
-                        raw_output, stream, verbose
-                    )
+
+                    responses_list = self._get_responses_list(raw_output, stream)
                     responses += responses_list
 
             except IOError:  # only occurs in python 2.7
@@ -345,12 +368,11 @@ class GdbController:
 
         return responses
 
-    def _get_responses_list(self, raw_output, stream, verbose):
+    def _get_responses_list(self, raw_output, stream):
         """Get parsed response list from string output
         Args:
             raw_output (unicode): gdb output to parse
             stream (str): either stdout or stderr
-            verbose (bool): add verbose output when true
         """
         responses = []
 
@@ -360,6 +382,7 @@ class GdbController:
 
         if not raw_output:
             return responses
+
         response_list = list(
             filter(lambda x: x, raw_output.decode(errors="replace").split("\n"))
         )  # remove blank lines
@@ -372,9 +395,10 @@ class GdbController:
                 parsed_response = gdbmiparser.parse_response(response)
                 parsed_response["stream"] = stream
 
+                self.logger.debug("%s", pformat(parsed_response))
+
                 responses.append(parsed_response)
-                if verbose:
-                    pprint(parsed_response)
+
         return responses
 
     def send_signal_to_gdb(self, signal_input):

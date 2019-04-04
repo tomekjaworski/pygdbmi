@@ -8,15 +8,19 @@ pygdbmi - Get Structured Output from GDB's Machine Interface
 </a>
 
 <a href="https://pypi.org/project/pygdbmi/">
-<img src="https://img.shields.io/badge/pypi-v0.8.3.0-blue.svg"/>
+<img src="https://img.shields.io/badge/pypi-v0.9.0.1-blue.svg"/>
 </a>
 
 
-<img src="https://img.shields.io/badge/python-2.7,3.3,3.4,3.5,3.6,pypy-blue.svg"/>
+<img src="https://img.shields.io/badge/python-2.7,3.4,3.5,3.6,pypy-blue.svg"/>
 <a href="https://github.com/ambv/black"><img src="https://img.shields.io/badge/code%20style-black-000000.svg" alt="Code style: black" /></a>
 </p>
 
 Python (**py**) [**gdb**](https://www.gnu.org/software/gdb/) machine interface [(**mi**)](https://sourceware.org/gdb/onlinedocs/gdb/GDB_002fMI.html)
+
+> GDB/MI is a line based machine oriented text interface to GDB and is activated by specifying using the --interpreter command line option (see Mode Options). It is specifically intended to support the development of systems which use the debugger as just one small component of a larger system.
+
+[>> read more](https://sourceware.org/gdb/onlinedocs/gdb/GDB_002fMI.html)
 
 ## What's in the box?
 
@@ -104,6 +108,7 @@ from pprint import pprint
 
 # Start gdb process
 gdbmi = GdbController()
+print(gdbmi.get_subprocess_cmd())  # print actual command run as subprocess
 
 # Load binary a.out and get structured response
 response = gdbmi.write('-file-exec-file a.out')

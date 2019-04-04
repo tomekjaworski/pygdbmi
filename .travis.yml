@@ -2,14 +2,17 @@ language: python
 sudo: required  # for gdb installation
 python:
   - "2.7"
-  - "3.3"
   - "3.4"
   - "3.5"
   - "3.6"
-  - "3.6-dev"
   - "3.7-dev"
-  - "nightly"
+  - "3.8-dev"
   - "pypy"
+
+matrix:
+  allow_failures:
+    - python: '3.7-dev'
+    - python: '3.8-dev'
 
 before_install:
   - sudo apt-get install gdb
@@ -22,5 +25,5 @@ script:
 
 cache:
     directories:
-        # avoid using pyPI's bandwidth when pip packages are already cached
+        # avoid using PyPI's bandwidth when pip packages are already cached
         - $HOME/.cache/pip

@@ -1,5 +1,12 @@
 a.out
 *.a
-_build
 build
 dist
+.DS_Store
+__pycache__
+*egg*
+__pycache__
+*.dSYM
+docs/_static
+.mypy_cache/
+venv
